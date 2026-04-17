@@ -1,0 +1,92 @@
+@page "/"
+@using Microsoft.AspNetCore.SignalR.Client
+@using System.Timers
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<div class="game-wrapper">
+    <div class="header">
+        <h2>RETRO MULTIPLAYER SNAKE</h2>
+        <p>Score: @score | Speed: @(Math.Round(1000/interval)) steps/s</p>
+    </div>
+
+    <div id="game-container"></div>
+
+    <div class="controls">
+        <button @onclick='() => Turn("left")'>◄ TURN LEFT</button>
+        <button @onclick='() => Turn("right")'>TURN RIGHT ►</button>
+    </div>
+</div>
+
+<style>
+    .game-wrapper { display: flex; flex-direction: column; align-items: center; background: #000; height: 100vh; color: #0f0; }
+    #game-container { width: 480px; height: 640px; border: 2px solid #0f0; }
+    .controls { margin-top: 10px; }
+    button { background: #111; color: #0f0; border: 1px solid #0f0; padding: 15px 30px; cursor: pointer; }
+    button:hover { background: #0f0; color: #000; }
+</style>
+
+@code {
+    private HubConnection? hub;
+    private IJSObjectReference? module;
+    private Timer? timer;
+    private string myId = Guid.NewGuid().ToString();
+    private string color = $"#{new Random().Next(0x1000000):X6}";
+    private int score = 0;
+    private double interval = 500;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            module = await JS.InvokeAsync<IJSObjectReference>("import", "./snake.js");
+            await module.InvokeVoidAsync("initGame");
+
+            hub = new HubConnectionBuilder()
+                .WithUrl("http://localhost:5187/gamehub") // Match your server port
+                .WithAutomaticReconnect()
+                .Build();
+
+            hub.On<string, List<Pos>, string>("ReceiveSnakeUpdate", async (id, b, c) => {
+                if (module != null) await module.InvokeVoidAsync("updateRemote", id, b, c);
+            });
+
+            await hub.StartAsync();
+
+            timer = new Timer(interval);
+            timer.Elapsed += async (s, e) => await Tick();
+            timer.Start();
+        }
+    }
+
+    private async Task Tick()
+    {
+        if (module != null)
+        {
+            var result = await module.InvokeAsync<TickResult>("gameTick");
+            score = result.Score;
+
+            if (result.Ate)
+            {
+                interval = Math.Max(80, interval * 0.92); // Faster!
+                timer!.Interval = interval;
+            }
+
+            if (hub?.State == HubConnectionState.Connected)
+                await hub.SendAsync("UpdateSnake", myId, result.Body, color);
+
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task Turn(string dir) => await module!.InvokeVoidAsync("turn", dir);
+
+    public class Pos { public float X { get; set; } public float Z { get; set; } }
+    public class TickResult { public List<Pos> Body { get; set; } = new(); public bool Ate { get; set; } public int Score { get; set; } }
+
+    public async ValueTask DisposeAsync()
+    {
+        timer?.Dispose();
+        if (hub != null) await hub.DisposeAsync();
+    }
+}
